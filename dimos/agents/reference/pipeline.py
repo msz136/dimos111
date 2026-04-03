@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import json
 from typing import Any
 
@@ -9,6 +10,7 @@ from dimos.agents.reference.torchvision_detector import TorchvisionCocoDetector
 from dimos.agents.reference.types import (
     CandidateScore,
     QueryAttribute,
+    QuerySelector,
     ReferenceCandidate,
     ReferenceGroundingResult,
 )
@@ -31,11 +33,17 @@ class ReferenceGroundingPipeline:
         detector_device: str | None = None,
         detector_backend: str = "yoloe",
         use_torchvision_fallback: bool = True,
+        use_vlm_candidate_rerank: bool = True,
+        vlm_rerank_top_k: int = 3,
+        vlm_rerank_weight: float = 1.25,
     ) -> None:
         self.vlm = vlm or AceBrainVlModel()
         self.detector_backend = detector_backend
         self.use_remote_attribute_judge = use_remote_attribute_judge
         self.use_torchvision_fallback = use_torchvision_fallback
+        self.use_vlm_candidate_rerank = use_vlm_candidate_rerank
+        self.vlm_rerank_top_k = vlm_rerank_top_k
+        self.vlm_rerank_weight = vlm_rerank_weight
         self.torchvision_detector: TorchvisionCocoDetector | None = None
         self.parser = parser or AceBrainReferenceParser(
             model=self.vlm,
@@ -67,6 +75,11 @@ class ReferenceGroundingPipeline:
         if self.use_remote_attribute_judge:
             self._score_remote_attributes(candidates, parsed.attributes)
         score_selectors(candidates, parsed.selectors)
+        if self.use_vlm_candidate_rerank and self._should_apply_vlm_rerank(
+            parsed.attributes,
+            parsed.selectors,
+        ):
+            self._score_vlm_candidate_match(image, query, candidates)
         ranked = sorted(candidates, key=lambda item: item.total_score, reverse=True)
         selected = ranked[0] if ranked else None
 
@@ -114,6 +127,51 @@ class ReferenceGroundingPipeline:
                     )
                 except Exception:
                     continue
+
+    def _score_vlm_candidate_match(
+        self,
+        image: Image,
+        query: str,
+        candidates: list[ReferenceCandidate],
+    ) -> None:
+        if len(candidates) < 2:
+            return
+
+        pre_ranked = sorted(candidates, key=lambda item: item.total_score, reverse=True)
+        for candidate in pre_ranked[: self.vlm_rerank_top_k]:
+            try:
+                highlighted = _highlight_detection(image, candidate.detection.bbox)
+                raw = self.vlm.query(highlighted, self._candidate_rerank_prompt(query, candidate))
+                parsed = self._extract_json(raw)
+                score = float(parsed.get("match_score", 0.0))
+                candidate.scores.append(
+                    CandidateScore(
+                        name="vlm:query_match",
+                        value=max(0.0, min(score, 1.0)) * self.vlm_rerank_weight,
+                        detail=parsed.get("reason", ""),
+                    )
+                )
+            except Exception:
+                continue
+
+    @staticmethod
+    def _should_apply_vlm_rerank(
+        attributes: list[QueryAttribute],
+        selectors: list[QuerySelector],
+    ) -> bool:
+        if attributes:
+            return True
+        return any(selector.kind in {"ordinal", "largest", "closest"} for selector in selectors)
+
+    @staticmethod
+    def _candidate_rerank_prompt(query: str, candidate: ReferenceCandidate) -> str:
+        return (
+            "The image shows the full scene, and a single candidate object is highlighted with a red rectangle. "
+            "Judge how well the highlighted object matches the user's request. "
+            "Consider object type, color or state, and relative position phrases like left/right/first/second. "
+            "Return only JSON with keys match_score (0-1 number) and reason (string). "
+            f"User request: {query}. Detector label: {candidate.detection.name}."
+        )
 
     @staticmethod
     def _attribute_prompt(attribute: QueryAttribute) -> str:
@@ -276,3 +334,23 @@ def _bbox_iou(
     if union <= 0:
         return 0.0
     return inter_area / union
+
+
+def _highlight_detection(
+    image: Image,
+    bbox: tuple[float, float, float, float],
+) -> Image:
+    opencv_image = image.to_bgr().as_numpy().copy()
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    cv2.rectangle(opencv_image, (x1, y1), (x2, y2), (0, 0, 255), 4)
+    cv2.putText(
+        opencv_image,
+        "candidate",
+        (x1, max(y1 - 10, 20)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return Image.from_opencv(opencv_image)
