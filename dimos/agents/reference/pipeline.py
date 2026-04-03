@@ -5,6 +5,7 @@ from typing import Any
 
 from dimos.agents.reference.parser import AceBrainReferenceParser
 from dimos.agents.reference.scorers import explain_candidate, score_attributes, score_selectors
+from dimos.agents.reference.torchvision_detector import TorchvisionCocoDetector
 from dimos.agents.reference.types import (
     CandidateScore,
     QueryAttribute,
@@ -29,10 +30,13 @@ class ReferenceGroundingPipeline:
         use_remote_attribute_judge: bool = False,
         detector_device: str | None = None,
         detector_backend: str = "yoloe",
+        use_torchvision_fallback: bool = True,
     ) -> None:
         self.vlm = vlm or AceBrainVlModel()
         self.detector_backend = detector_backend
         self.use_remote_attribute_judge = use_remote_attribute_judge
+        self.use_torchvision_fallback = use_torchvision_fallback
+        self.torchvision_detector: TorchvisionCocoDetector | None = None
         self.parser = parser or AceBrainReferenceParser(
             model=self.vlm,
             use_remote=use_remote_parser,
@@ -79,6 +83,8 @@ class ReferenceGroundingPipeline:
 
     def stop(self) -> None:
         self.detector.stop()
+        if self.torchvision_detector is not None:
+            self.torchvision_detector.stop()
         self.vlm.stop()
 
     @staticmethod
@@ -160,7 +166,17 @@ class ReferenceGroundingPipeline:
                     continue
                 merged.append(_remap_detection_to_image(det, image, x, y))
 
+        if self.use_torchvision_fallback and (not merged or noun == "table"):
+            merged.extend(self._detect_torchvision_candidates(image, noun))
+
         return ImageDetections2D(image=image, detections=_dedupe_detections(merged))
+
+    def _detect_torchvision_candidates(self, image: Image, noun: str) -> list[Detection2DBBox]:
+        if noun not in {"chair", "table", "person"}:
+            return []
+        if self.torchvision_detector is None:
+            self.torchvision_detector = TorchvisionCocoDetector()
+        return self.torchvision_detector.detect(image, noun)
 
 
 def _noun_aliases(noun: str) -> set[str]:

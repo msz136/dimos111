@@ -78,7 +78,13 @@ def run_eval(
         detector_backend=detector_backend,
     )
     results: list[dict[str, Any]] = []
-    for case_dir in sorted(path for path in cases_dir.iterdir() if path.is_dir()):
+    for case_dir in sorted(
+        path
+        for path in cases_dir.iterdir()
+        if path.is_dir()
+        and path.name != "reference_pipeline_runs"
+        and any(path.glob("*.jpg"))
+    ):
         image_path = _find_primary_image(case_dir)
         query = _extract_query(case_dir)
         image = Image.from_file(image_path)
