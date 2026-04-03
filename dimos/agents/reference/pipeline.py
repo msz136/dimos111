@@ -353,4 +353,47 @@ def _highlight_detection(
         2,
         cv2.LINE_AA,
     )
-    return Image.from_opencv(opencv_image)
+    scene = opencv_image
+
+    crop_padding = 24
+    crop = image.crop(
+        x1 - crop_padding,
+        y1 - crop_padding,
+        max(x2 - x1 + 2 * crop_padding, 1),
+        max(y2 - y1 + 2 * crop_padding, 1),
+    ).to_bgr()
+    crop_bgr = crop.as_numpy().copy()
+    target_height = scene.shape[0]
+    scale = target_height / max(crop_bgr.shape[0], 1)
+    crop_width = max(int(crop_bgr.shape[1] * scale), 1)
+    crop_panel = cv2.resize(crop_bgr, (crop_width, target_height), interpolation=cv2.INTER_LINEAR)
+    cv2.rectangle(
+        crop_panel,
+        (0, 0),
+        (crop_panel.shape[1] - 1, crop_panel.shape[0] - 1),
+        (0, 0, 255),
+        4,
+    )
+    cv2.putText(
+        crop_panel,
+        "zoomed candidate",
+        (16, 36),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 0, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    gap = 16
+    panel = cv2.copyMakeBorder(
+        scene,
+        0,
+        0,
+        0,
+        gap,
+        borderType=cv2.BORDER_CONSTANT,
+        value=(255, 255, 255),
+    )
+    combined = cv2.hconcat([panel, crop_panel])
+    return Image.from_opencv(combined)
