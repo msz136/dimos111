@@ -2,7 +2,7 @@ from typing import Literal
 
 from dimos.models.vl.base import VlModel
 
-VlModelName = Literal["qwen", "moondream"]
+VlModelName = Literal["qwen", "moondream", "acebrain"]
 
 
 def create(name: VlModelName) -> VlModel:
@@ -14,3 +14,6 @@ def create(name: VlModelName) -> VlModel:
         case "moondream":
             from dimos.models.vl.moondream import MoondreamVlModel
             return MoondreamVlModel()
+        case "acebrain":
+            from dimos.models.vl.acebrain import AceBrainVlModel
+            return AceBrainVlModel()
