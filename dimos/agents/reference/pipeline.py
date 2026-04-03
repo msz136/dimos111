@@ -16,6 +16,7 @@ from dimos.models.vl.acebrain import AceBrainVlModel
 from dimos.perception.detection.detectors.types import Detector
 from dimos.perception.detection.detectors.yolo import Yolo2DDetector
 from dimos.perception.detection.detectors.yoloe import Yoloe2DDetector, YoloePromptMode
+from dimos.perception.detection.type import Detection2DBBox, ImageDetections2D
 
 
 class ReferenceGroundingPipeline:
@@ -30,6 +31,7 @@ class ReferenceGroundingPipeline:
         detector_backend: str = "yoloe",
     ) -> None:
         self.vlm = vlm or AceBrainVlModel()
+        self.detector_backend = detector_backend
         self.use_remote_attribute_judge = use_remote_attribute_judge
         self.parser = parser or AceBrainReferenceParser(
             model=self.vlm,
@@ -127,6 +129,9 @@ class ReferenceGroundingPipeline:
         raise ValueError("Expected dict JSON response")
 
     def _detect_candidates(self, image: Image, noun: str) -> Any:
+        if self.detector_backend == "yolo":
+            return self._detect_candidates_with_tiling(image, noun)
+
         if hasattr(self.detector, "set_prompts"):
             prompts = sorted(_noun_aliases(noun))
             getattr(self.detector, "set_prompts")(text=prompts)
@@ -139,6 +144,23 @@ class ReferenceGroundingPipeline:
             if _matches_noun(det.name, noun)
         ]
         return detections
+
+    def _detect_candidates_with_tiling(self, image: Image, noun: str) -> ImageDetections2D:
+        merged: list[Detection2DBBox] = []
+        full_image_detections = self.detector.process_image(image)
+        merged.extend(
+            det for det in full_image_detections.detections if _matches_noun(det.name, noun)
+        )
+
+        for x, y, width, height in _tile_regions(image.width, image.height):
+            tile = image.crop(x, y, width, height)
+            tile_detections = self.detector.process_image(tile)
+            for det in tile_detections.detections:
+                if not _matches_noun(det.name, noun):
+                    continue
+                merged.append(_remap_detection_to_image(det, image, x, y))
+
+        return ImageDetections2D(image=image, detections=_dedupe_detections(merged))
 
 
 def _noun_aliases(noun: str) -> set[str]:
@@ -158,3 +180,83 @@ def _matches_noun(detection_name: str, noun: str) -> bool:
     candidate = detection_name.strip().lower()
     aliases = _noun_aliases(noun)
     return any(alias in candidate or candidate in alias for alias in aliases)
+
+
+def _tile_regions(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    tile_regions: list[tuple[int, int, int, int]] = []
+
+    quad_width = max(int(width * 0.65), 1)
+    quad_height = max(int(height * 0.7), 1)
+    x_positions = sorted({0, max(width - quad_width, 0)})
+    y_positions = sorted({0, max(height - quad_height, 0)})
+    for x in x_positions:
+        for y in y_positions:
+            tile_regions.append((x, y, quad_width, quad_height))
+
+    strip_width = max(int(width * 0.55), 1)
+    strip_x_positions = sorted({0, max((width - strip_width) // 2, 0), max(width - strip_width, 0)})
+    for x in strip_x_positions:
+        tile_regions.append((x, 0, strip_width, height))
+
+    # Preserve order while removing duplicates.
+    deduped: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for region in tile_regions:
+        if region not in seen:
+            seen.add(region)
+            deduped.append(region)
+    return deduped
+
+
+def _remap_detection_to_image(
+    detection: Detection2DBBox,
+    image: Image,
+    offset_x: int,
+    offset_y: int,
+) -> Detection2DBBox:
+    x1, y1, x2, y2 = detection.bbox
+    return Detection2DBBox(
+        bbox=(x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y),
+        track_id=detection.track_id,
+        class_id=detection.class_id,
+        confidence=detection.confidence,
+        name=detection.name,
+        ts=image.ts,
+        image=image,
+    )
+
+
+def _dedupe_detections(
+    detections: list[Detection2DBBox],
+    iou_threshold: float = 0.6,
+) -> list[Detection2DBBox]:
+    kept: list[Detection2DBBox] = []
+    for detection in sorted(detections, key=lambda item: item.confidence, reverse=True):
+        if any(
+            _bbox_iou(detection.bbox, existing.bbox) >= iou_threshold and detection.name == existing.name
+            for existing in kept
+        ):
+            continue
+        kept.append(detection)
+    return kept
+
+
+def _bbox_iou(
+    box_a: tuple[float, float, float, float],
+    box_b: tuple[float, float, float, float],
+) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    area_a = max(ax2 - ax1, 0.0) * max(ay2 - ay1, 0.0)
+    area_b = max(bx2 - bx1, 0.0) * max(by2 - by1, 0.0)
+    union = area_a + area_b - inter_area
+    if union <= 0:
+        return 0.0
+    return inter_area / union

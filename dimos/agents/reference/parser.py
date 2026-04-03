@@ -60,10 +60,12 @@ def _extract_attributes(text: str) -> list[QueryAttribute]:
 def _extract_selectors(text: str) -> list[QuerySelector]:
     selectors: list[QuerySelector] = []
     lowered = text.lower()
+    anchored_from_right = "from the right" in lowered or "从右" in text
+    anchored_from_left = "from the left" in lowered or "从左" in text
 
-    if any(token in text for token in ["左边", "左侧"]) or "left" in lowered:
+    if not anchored_from_left and (any(token in text for token in ["左边", "左侧"]) or "left" in lowered):
         selectors.append(QuerySelector(kind="side", value="left", frame="image"))
-    if any(token in text for token in ["右边", "右侧"]) or "right" in lowered:
+    if not anchored_from_right and (any(token in text for token in ["右边", "右侧"]) or "right" in lowered):
         selectors.append(QuerySelector(kind="side", value="right", frame="image"))
 
     if "closest" in lowered or "最近" in text:
@@ -86,9 +88,9 @@ def _extract_selectors(text: str) -> list[QuerySelector]:
                 selectors.append(QuerySelector(kind="ordinal", value=value))
                 break
 
-    if "from the right" in lowered or "从右" in text:
+    if anchored_from_right:
         selectors.append(QuerySelector(kind="axis_order", axis="right_to_left"))
-    elif "from the left" in lowered or "从左" in text:
+    elif anchored_from_left:
         selectors.append(QuerySelector(kind="axis_order", axis="left_to_right"))
 
     return selectors
